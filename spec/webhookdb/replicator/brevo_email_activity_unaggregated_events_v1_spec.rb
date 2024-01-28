@@ -81,14 +81,14 @@ RSpec.describe Webhookdb::Replicator::BrevoEmailActivityUnaggregatedEventsV1, :d
 
     def stub_service_request
       return stub_request(:get, "https://api.brevo.com/v3/smtp/statistics/events?days=90").
-        with(headers: {"api-key" => "bfkey"}).
-        to_return(status: 200, body: success_body, headers: {})
+          with(headers: {"api-key" => "bfkey"}).
+          to_return(status: 200, body: success_body, headers: {})
     end
 
     def stub_service_request_error
       return stub_request(:get, "https://api.brevo.com/v3/smtp/statistics/events?days=90").
-        with(headers: {"api-key" => "bfkey_wrong"}).
-        to_return(status: 401, body: "", headers: {})
+          with(headers: {"api-key" => "bfkey_wrong"}).
+          to_return(status: 401, body: "", headers: {})
     end
   end
 
@@ -150,10 +150,8 @@ RSpec.describe Webhookdb::Replicator::BrevoEmailActivityUnaggregatedEventsV1, :d
     let(:expected_items_count) { 4 }
     def stub_service_requests
       return [
-        stub_request(:get, "https://api.brevo.com/v3").
-          with(headers: {"Authorization" => "Bearer bfkey"}).
-          to_return(status: 200, body: page1_response, headers: {"Content-Type" => "application/json"}),
-        stub_request(:get, "https://api.brevo.com/v3/smtp/statistics/events?limit=10&offset=0&sort=desc&event=requests&startDate=2024-01-22&endDate=2024-01-22").
+        stub_request(:get, "https://api.brevo.com/v3/smtp/statistics/events?days=90").
+          to_return(status: 200, body: page1_response, headers: {"Content-Type" => "application/json"}).
           to_return(status: 200, body: page2_response, headers: {"Content-Type" => "application/json"}),
       ]
     end
@@ -167,7 +165,7 @@ RSpec.describe Webhookdb::Replicator::BrevoEmailActivityUnaggregatedEventsV1, :d
 
     def stub_service_request_error
       return stub_request(:get, "https://api.brevo.com/v3/smtp/statistics/events?days=90").
-        to_return(status: 400, body: "geh")
+          to_return(status: 400, body: "geh")
     end
   end
 
@@ -187,6 +185,76 @@ RSpec.describe Webhookdb::Replicator::BrevoEmailActivityUnaggregatedEventsV1, :d
       req.add_header("REMOTE_ADDR", "1.1.1.1")
       status, _headers, _body = svc.webhook_response(req).to_rack
       expect(status).to eq(401)
+    end
+  end
+
+  describe "state machine calculation" do
+    let(:sint) do
+      # Set api url to empty string so that backfill flow works correctly for testing purposes
+      Webhookdb::Fixtures.service_integration.create(service_name: "brevo_email_activity_unaggregated_events_v1", api_url: "")
+    end
+    let(:svc) { Webhookdb::Replicator.create(sint) }
+
+    describe "process_state_change" do
+      it "uses a default api url if value is blank" do
+        sint.replicator.process_state_change("api_url", "")
+        expect(sint.api_url).to eq("https://api.brevo.com/v3")
+      end
+    end
+
+    describe "calculate_backfill_state_machine" do
+      let(:success_body) do
+        <<~R
+          {}
+        R
+      end
+
+      def stub_service_request
+        return stub_request(:get, "https://api.brevo.com/v3").
+          with(headers: {"api-key" => "bfkey"}).
+          to_return(status: 200, body: success_body, headers: {})
+      end
+
+      it "asks for backfill key" do
+        sm = sint.replicator.calculate_backfill_state_machine
+        expect(sm).to have_attributes(
+          needs_input: true,
+          prompt: "Paste or type your API Key here:",
+          prompt_is_secret: true,
+          post_to_url: end_with("/service_integrations/#{sint.opaque_id}/transition/backfill_key"),
+          complete: false,
+          output: match("In order to backfill Increase Accounts, we need an API key."),
+        )
+      end
+
+      it "asks for api url" do
+        sint.backfill_key = "bfkey"
+        sm = sint.replicator.calculate_backfill_state_machine
+        expect(sm).to have_attributes(
+          needs_input: true,
+          prompt: "Paste or type your API url here:",
+          prompt_is_secret: false,
+          post_to_url: end_with("/service_integrations/#{sint.opaque_id}/transition/api_url"),
+          complete: false,
+          output: match("Now we want to make sure we're sending API requests to the right place"),
+        )
+      end
+
+      it "confirms reciept of api url, returns org database info" do
+        sint.backfill_key = "bfkey"
+        sint.api_url = "https://api.brevo.com/v3"
+        res = stub_service_request
+        sm = sint.replicator.calculate_backfill_state_machine
+        expect(res).to have_been_made
+        expect(sm).to have_attributes(
+          needs_input: false,
+          prompt: "",
+          prompt_is_secret: false,
+          post_to_url: "",
+          complete: true,
+          output: match("Great! We are going to start backfilling your Increase Accounts."),
+        )
+      end
     end
   end
 
